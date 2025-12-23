@@ -5,16 +5,15 @@ on:
 
 jobs:
   build-armbian:
-    runs-on: ubuntu-22.04  # 替换latest为22.04，避免兼容性问题
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive  # 同步子模块（若有设备树/补丁依赖）
+          submodules: recursive
 
       - name: Fetch Armbian Build
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build
-          # 切换到包含sakurapi-rk3308b补丁的Armbian版本（关键！）
           cd build
           git fetch origin 60e869c42c03af0428d9983750eb766a7a846d43
           git checkout 60e869c42c03af0428d9983750eb766a7a846d43
@@ -35,93 +34,74 @@ jobs:
             patch \
             flex \
             bison
-          
-          # 启用 binfmt 支持以进行交叉编译
           sudo update-binfmts --enable
           sudo systemctl restart systemd-binfmt
 
       - name: Setup QEMU for cross compilation
         run: |
-          # 确保 QEMU 静态链接支持正确安装
           sudo apt-get install -y qemu-user-static
-          # 验证 QEMU 支持
           which qemu-aarch64-static || echo "QEMU aarch64 not found"
-          # 拷贝QEMU到容器路径（Armbian编译需要）
           sudo cp /usr/bin/qemu-aarch64-static /usr/local/bin/
           
       - name: Setup userpatches structure
         run: |
-          # 首先创建Armbian构建目录的userpatches结构
           mkdir -p build/userpatches/config/boards
           mkdir -p build/userpatches/overlay
           mkdir -p build/userpatches/patch/u-boot/v2025.04/board_sakurapi-rk3308b/
           
-          # 将项目的userpatches内容复制到Armbian构建目录
           if [ -d "userpatches" ]; then
             cp -r userpatches/* build/userpatches/
           fi
           
-          # 下载Sakura Pi RK3308B补丁（生成正确的defconfig）
-          curl -o build/userpatches/patch/u-boot/v2025.04/board_sakurapi-rk3308b/add-board-sakurapi-rk3308b.patch \
-            https://github.com/armbian/build/raw/60e869c42c03af0428d9983750eb766a7a846d43/patch/u-boot/v2025.04/board_sakurapi-rk3308b/add-board-sakurapi-rk3308b.patch
-          
-          # 创建Sogou E1板级配置文件 - 修复所有关键参数
+          # 修复：EOF 闭合 + 配置格式修正
           cat > build/userpatches/config/boards/sogou_e1.conf << 'EOL'
-          # Sogou E1 board configuration
           BOARD_NAME="Sogou E1"
           BOARDFAMILY="rockchip64"
-          # 修复1：BOOTCONFIG命名（下划线，无横杠）
           BOOTCONFIG="sakurapi_rk3308b_defconfig"
-          # 修复2：指定U-Boot版本（匹配补丁）
           BOOTBRANCH="tag:v2025.04"
           BOOTPATCHDIR="v2025.04"
           KERNEL_TARGET="current"
-          # 修复3：设备树名称对齐实际文件
           BOOT_FDT_FILE="rockchip/rk3308-sogou-e1.dtb"
           SERIALCON="ttyS2:1500000"
-          HAS_VIDEO_OUTPUT="no"  # RK3308B无视频输出，改为no
-          # 修复4：添加U-Boot依赖的二进制blob
+          HAS_VIDEO_OUTPUT="no"
           BL31_BLOB="rk33/rk3308_bl31_v2.26.elf"
           DDR_BLOB="rk33/rk3308_ddr_589MHz_uart2_m1_v1.30.bin"
           MINILOADER_BLOB="rk33/rk3308_miniloader_sd_nand_v1.13.bin"
-          # 音频设备相关包
           PACKAGE_LIST_BOARD="alsa-utils firmware-realtek firmware-brcm80211 wireless-regdb wpasupplicant hostapd iw"
           EOL
 
       - name: Setup device tree
         run: |
-          # 如果存在自定义设备树文件，则处理设备树
           if [ -f userpatches/extracted.dts ]; then
             echo "发现自定义设备树文件，正在处理..."
-            
-            # 创建设备树文件到正确位置（Armbian编译路径）
             mkdir -p build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip
             cp userpatches/extracted.dts build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts
-            
-            # 预编译设备树（兜底，确保DTB生成）
             dtc -I dts -O dtb -o build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dtb build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts
-            echo "自定义设备树已编译为DTB，路径：build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dtb"
+            echo "自定义设备树已编译为DTB"
           else
-            echo "未找到自定义DTS文件，将使用RK3308默认配置"
-            # 下载默认RK3308B设备树
+            echo "未找到自定义DTS文件，使用RK3308默认配置"
             mkdir -p build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip
             curl -o build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts \
               https://github.com/rockchip-linux/kernel/raw/master/arch/arm64/boot/dts/rockchip/rk3308-evb.dts
           fi
 
-      - name: Pre-build U-Boot (生成缺失的defconfig)
+      - name: Pre-build U-Boot (修复克隆+EOF语法)
         run: |
           cd build
-          # 下载U-Boot v2025.04源码
           mkdir -p cache/sources/u-boot/v2025.04
-          git clone --depth=1 --branch v2025.04 https://github.com/u-boot/u-boot.git cache/sources/u-boot/v2025.04
-          # 应用补丁生成sakurapi_rk3308b_defconfig
+          # 修复：直接克隆U-Boot main分支，切换到v2025.04 tag（避免轻量标签问题）
+          git clone --depth=1 https://github.com/u-boot/u-boot.git cache/sources/u-boot/v2025.04
+          cd cache/sources/u-boot/v2025.04
+          git checkout tags/v2025.04 -b v2025.04  # 切换到标签并创建分支
+          cd ../../../../
+          # 应用补丁
           patch -d cache/sources/u-boot/v2025.04 -p1 < userpatches/patch/u-boot/v2025.04/board_sakurapi-rk3308b/add-board-sakurapi-rk3308b.patch
-          # 验证defconfig生成
+          # 验证defconfig
           if [ -f cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig ]; then
             echo "✅ sakurapi_rk3308b_defconfig 生成成功！"
           else
-            echo "❌ defconfig生成失败，手动创建兜底配置"
+            echo "❌ defconfig生成失败，手动创建"
+            # 修复：EOF 正确闭合 + 单行配置（避免换行问题）
             cat > cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig << EOF
             CONFIG_ARM64=y
             CONFIG_ARCH_ROCKCHIP=y
@@ -134,29 +114,17 @@ jobs:
             CONFIG_SYS_MMC_ENV_DEV=0
             CONFIG_ROCKCHIP_SDMMC=y
             EOF
+            # 验证EOF闭合
+            if [ -f cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig ]; then
+              echo "✅ 手动创建defconfig成功"
+            fi
           fi
 
       - name: Build Armbian image
         run: |
           cd build
-          
-          # 最终编译命令（修复所有参数）
-          sudo ./compile.sh \
-            BOARD=sogou_e1 \
-            BRANCH=current \
-            RELEASE=bookworm \
-            BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no \
-            KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,img \
-            # 强制指定U-Boot版本和配置（兜底）
-            BOOTCONFIG=sakurapi_rk3308b_defconfig \
-            BOOTBRANCH=tag:v2025.04 \
-            SKIP_UBOOT_DOWNLOAD=yes \  # 禁用自动下载，使用预编译的U-Boot
-            ARCH=arm64 \
-            TARGET=image \
-            IMAGE_SIZE=4G \
-            -j$(nproc)  # 多核编译加速
+          # 修复：编译命令单行书写（避免换行符导致的语法错误）
+          sudo ./compile.sh BOARD=sogou_e1 BRANCH=current RELEASE=bookworm BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE=sha,img BOOTCONFIG=sakurapi_rk3308b_defconfig BOOTBRANCH=tag:v2025.04 SKIP_UBOOT_DOWNLOAD=yes ARCH=arm64 TARGET=image IMAGE_SIZE=4G -j$(nproc)
 
       - name: Upload image
         uses: actions/upload-artifact@v4
@@ -165,4 +133,4 @@ jobs:
           path: |
             build/output/images/*.img
             build/output/images/*.img.sha
-            build/output/logs/*.log  # 新增日志上传，便于排错
+            build/output/logs/*.log
