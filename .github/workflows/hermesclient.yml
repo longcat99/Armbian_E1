@@ -5,101 +5,110 @@ on:
 
 jobs:
   build-armbian:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Fetch Armbian Build
-        run: |
-          git clone --depth=1 https://github.com/armbian/build
-          cd build
-          # 检出稳定版（避免最新代码的兼容性问题）
-          git checkout 23.02.2
+        run: git clone https://github.com/armbian/build
 
       - name: Install dependencies
         run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y \
-            device-tree-compiler qemu-user-static binfmt-support \
-            qemu-system-arm qemu-efi-aarch64 qemu-utils \
-            gcc-aarch64-linux-gnu u-boot-tools libssl-dev patch flex bison
-          sudo update-binfmts --enable
+          sudo apt-get update
+          sudo apt-get install -y \
+            device-tree-compiler \
+            qemu-user-static \
+            binfmt-support \
+            qemu-system-arm \
+            qemu-efi-aarch64 \
+            qemu-utils
+          
+          # 启用 binfmt 支持以进行交叉编译
           sudo systemctl restart systemd-binfmt
 
-      - name: Setup QEMU
+      - name: Setup QEMU for cross compilation
         run: |
-          sudo apt install -y qemu-user-static
-          sudo cp /usr/bin/qemu-aarch64-static /usr/local/bin/
-          which qemu-aarch64-static && echo "QEMU ready" || echo "QEMU missing"
+          # 确保 QEMU 静态链接支持正确安装
+          sudo apt-get install -y qemu-user-static
 
-      - name: Setup userpatches
-        run: |
-          # 1. 创建目录结构
-          mkdir -p build/userpatches/{config/boards,kernel/rockchip64-current/arch/arm64/boot/dts/rockchip}
+          # 验证 QEMU 支持
+          which qemu-aarch64-static || echo "QEMU aarch64 not found"
           
-          # 2. 写入板型配置（核心：EOF 单独一行，无空格/注释干扰）
+      - name: Setup userpatches structure
+        run: |
+          # 首先创建Armbian构建目录的userpatches结构
+          mkdir -p build/userpatches/config/boards
+          mkdir -p build/userpatches/overlay
+          
+          # 将项目的userpatches内容复制到Armbian构建目录
+          if [ -d "userpatches" ]; then
+            cp -r userpatches/* build/userpatches/
+          fi
+          
+          # 创建Sogou E1板级配置文件 - 基于现有的RK3308配置
           cat > build/userpatches/config/boards/sogou_e1.conf << 'EOL'
+          # Sogou E1 board configuration
           BOARD_NAME="Sogou E1"
           BOARDFAMILY="rockchip64"
-          BOOTCONFIG="rk3308_defconfig"
-          BOOTBRANCH="tag:v2022.07"
+          BOOTCONFIG="sakurapi-rk3308b_defconfig"
           KERNEL_TARGET="current"
           BOOT_FDT_FILE="rockchip/rk3308-sogou-e1.dtb"
           SERIALCON="ttyS2:1500000"
-          HAS_VIDEO_OUTPUT="no"
-          BL31_BLOB="rk33/rk3308_bl31_v2.26.elf"
-          DDR_BLOB="rk33/rk3308_ddr_589MHz_uart2_m1_v1.30.bin"
-          MINILOADER_BLOB="rk33/rk3308_miniloader_sd_nand_v1.13.bin"
+          HAS_VIDEO_OUTPUT="yes"
+          
+          # 音频设备相关包
           PACKAGE_LIST_BOARD="alsa-utils firmware-realtek firmware-brcm80211 wireless-regdb wpasupplicant hostapd iw"
           EOL
 
-          # 3. 写入设备树（兜底）
-          cat > build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts << 'EOL'
-          /dts-v1/;
-          #include "rk3308.dtsi"
-          / {
-            model = "Sogou E1";
-            compatible = "rockchip,rk3308-sogou-e1", "rockchip,rk3308";
-            chosen {
-              stdout-path = "serial2:1500000n8";
-            };
-          };
-          &uart2 {
-            status = "okay";
-          };
-          &sdmmc {
-            status = "okay";
-            bus-width = <4>;
-          };
-          EOL
+      - name: Setup device tree
+        run: |
+          # 如果存在自定义设备树文件，则处理设备树
+          if [ -f userpatches/extracted.dts ]; then
+            echo "发现自定义设备树文件，正在处理..."
+            
+            # 创建设备树文件到正确位置，以便Armbian构建系统识别
+            mkdir -p build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip
+            cp userpatches/extracted.dts build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts
+            
+            echo "自定义设备树已准备完成，Armbian将自动处理DTB编译"
+          else
+            echo "未找到自定义DTS文件，将使用RK3308默认配置"
+          fi
 
-          # 4. 预编译设备树
-          dtc -I dts -O dtb -o build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dtb build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sogou-e1.dts
-
-      - name: Build Armbian image (关键：让Armbian自动处理U-Boot)
+      - name: Check available defconfigs and boards
         run: |
           cd build
-          # 核心：不手动干预U-Boot，让Armbian自动下载适配的版本
-          sudo ./compile.sh \
+          echo "=== 检查可用的defconfig文件 ==="
+          echo "U-Boot defconfig文件:"
+          find . -name "*defconfig" -path "*/u-boot/*" | grep -E "(rk33|rockchip|evb)" | head -10 || echo "未找到u-boot defconfig"
+          
+          echo -e "\n=== 检查Armbian现有板级配置 ==="
+          echo "现有的rockchip64相关板级配置:"
+          find config/boards -name "*.conf" | grep -v ".csc\|.wip\|.eos" | head -10
+          
+          echo -e "\n=== 检查设备树文件 ==="
+          echo "RK33xx设备树文件:"
+          find . -name "rk33*.dts*" | head -10 || echo "未找到设备树文件"
+
+      - name: Build Armbian image
+        run: |
+          cd build
+          
+          # 尝试使用更兼容的构建方式
+          # 如果原生交叉编译失败，使用Docker方式
+          ./compile.sh \
             BOARD=sogou_e1 \
             BRANCH=current \
             RELEASE=bookworm \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no \
             KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,img \
-            ARCH=arm64 \
-            TARGET=image \
-            IMAGE_SIZE=4G \
-            -j$(nproc)
+            COMPRESS_OUTPUTIMAGE=sha,img 
 
-      - name: Upload artifacts
+      - name: Upload image
         uses: actions/upload-artifact@v4
         with:
           name: armbian-rk3308-e1
           path: |
             build/output/images/*.img
             build/output/images/*.img.sha
-            build/output/logs/*.log
