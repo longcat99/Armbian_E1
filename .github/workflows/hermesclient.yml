@@ -50,7 +50,7 @@ jobs:
           # Sogou E1 board configuration
           BOARD_NAME="Sogou E1"
           BOARDFAMILY="rockchip64"
-          BOOTCONFIG="sakurapi-rk3308b_defconfig"
+          BOOTCONFIG="sakurapi-rk3308_defconfig"
           KERNEL_TARGET="current"
           BOOT_FDT_FILE="rockchip/rk3308-sogou-e1.dtb"
           SERIALCON="ttyS2:1500000"
