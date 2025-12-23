@@ -47,19 +47,19 @@ jobs:
         run: |
           mkdir -p build/userpatches/config/boards
           mkdir -p build/userpatches/overlay
-          mkdir -p build/userpatches/patch/u-boot/v2025.04/board_sakurapi-rk3308b/
+          mkdir -p build/userpatches/patch/u-boot/v2024.10/board_sakurapi-rk3308b/
           
           if [ -d "userpatches" ]; then
             cp -r userpatches/* build/userpatches/
           fi
           
-          # 修复：EOF 闭合 + 配置格式修正
+          # 核心修改：改用U-Boot v2024.10（官方稳定版）
           cat > build/userpatches/config/boards/sogou_e1.conf << 'EOL'
           BOARD_NAME="Sogou E1"
           BOARDFAMILY="rockchip64"
-          BOOTCONFIG="sakurapi_rk3308b_defconfig"
-          BOOTBRANCH="tag:v2025.04"
-          BOOTPATCHDIR="v2025.04"
+          BOOTCONFIG="rk3308_defconfig"  # 改用瑞芯微官方通用配置
+          BOOTBRANCH="tag:v2024.10"      # 官方稳定版
+          BOOTPATCHDIR="v2024.10"
           KERNEL_TARGET="current"
           BOOT_FDT_FILE="rockchip/rk3308-sogou-e1.dtb"
           SERIALCON="ttyS2:1500000"
@@ -85,27 +85,24 @@ jobs:
               https://github.com/rockchip-linux/kernel/raw/master/arch/arm64/boot/dts/rockchip/rk3308-evb.dts
           fi
 
-      - name: Pre-build U-Boot (修复克隆+EOF语法)
+      - name: Pre-build U-Boot（改用官方稳定版v2024.10）
         run: |
           cd build
-          mkdir -p cache/sources/u-boot/v2025.04
-          # 修复：直接克隆U-Boot main分支，切换到v2025.04 tag（避免轻量标签问题）
-          git clone --depth=1 https://github.com/u-boot/u-boot.git cache/sources/u-boot/v2025.04
-          cd cache/sources/u-boot/v2025.04
-          git checkout tags/v2025.04 -b v2025.04  # 切换到标签并创建分支
-          cd ../../../../
-          # 应用补丁
-          patch -d cache/sources/u-boot/v2025.04 -p1 < userpatches/patch/u-boot/v2025.04/board_sakurapi-rk3308b/add-board-sakurapi-rk3308b.patch
-          # 验证defconfig
-          if [ -f cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig ]; then
-            echo "✅ sakurapi_rk3308b_defconfig 生成成功！"
+          mkdir -p cache/sources/u-boot/v2024.10
+          # 克隆U-Boot官方稳定版v2024.10（确保标签有效）
+          git clone --depth=1 --branch=v2024.10 https://github.com/u-boot/u-boot.git cache/sources/u-boot/v2024.10
+          # 下载瑞芯微官方RK3308配置（替代无效的sakurapi补丁）
+          curl -o cache/sources/u-boot/v2024.10/configs/rk3308_defconfig \
+            https://github.com/rockchip-linux/u-boot/raw/master/configs/rk3308_defconfig
+          # 验证配置文件
+          if [ -f cache/sources/u-boot/v2024.10/configs/rk3308_defconfig ]; then
+            echo "✅ RK3308官方defconfig下载成功！"
           else
-            echo "❌ defconfig生成失败，手动创建"
-            # 修复：EOF 正确闭合 + 单行配置（避免换行问题）
-            cat > cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig << EOF
+            echo "❌ 配置文件下载失败，手动创建"
+            cat > cache/sources/u-boot/v2024.10/configs/rk3308_defconfig << EOF
             CONFIG_ARM64=y
             CONFIG_ARCH_ROCKCHIP=y
-            CONFIG_TARGET_SAKURAPI_RK3308B=y
+            CONFIG_TARGET_RK3308=y
             CONFIG_SYS_MALLOC_F_LEN=0x2000
             CONFIG_ROCKCHIP_GPIO=y
             CONFIG_SYS_LOAD_ADDR=0x80800000
@@ -114,17 +111,13 @@ jobs:
             CONFIG_SYS_MMC_ENV_DEV=0
             CONFIG_ROCKCHIP_SDMMC=y
             EOF
-            # 验证EOF闭合
-            if [ -f cache/sources/u-boot/v2025.04/configs/sakurapi_rk3308b_defconfig ]; then
-              echo "✅ 手动创建defconfig成功"
-            fi
           fi
 
       - name: Build Armbian image
         run: |
           cd build
-          # 修复：编译命令单行书写（避免换行符导致的语法错误）
-          sudo ./compile.sh BOARD=sogou_e1 BRANCH=current RELEASE=bookworm BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE=sha,img BOOTCONFIG=sakurapi_rk3308b_defconfig BOOTBRANCH=tag:v2025.04 SKIP_UBOOT_DOWNLOAD=yes ARCH=arm64 TARGET=image IMAGE_SIZE=4G -j$(nproc)
+          # 编译命令：改用rk3308_defconfig + v2024.10
+          sudo ./compile.sh BOARD=sogou_e1 BRANCH=current RELEASE=bookworm BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE=sha,img BOOTCONFIG=rk3308_defconfig BOOTBRANCH=tag:v2024.10 SKIP_UBOOT_DOWNLOAD=yes ARCH=arm64 TARGET=image IMAGE_SIZE=4G -j$(nproc)
 
       - name: Upload image
         uses: actions/upload-artifact@v4
