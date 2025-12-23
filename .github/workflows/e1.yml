@@ -1,4 +1,4 @@
-name: Hermes Client Build
+name: e1
 on: [workflow_dispatch]
 
 jobs:
