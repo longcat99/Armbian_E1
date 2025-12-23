@@ -1,3 +1,4 @@
+
 name: Hermes Client Build
 
 on:
@@ -97,7 +98,7 @@ jobs:
           # 尝试使用更兼容的构建方式
           # 如果原生交叉编译失败，使用Docker方式
           ./compile.sh \
-            BOARD=sogou_e1 \
+            BOARD=sakurapi-rk3308b \
             BRANCH=current \
             RELEASE=bookworm \
             BUILD_MINIMAL=yes \
