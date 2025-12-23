@@ -1,0 +1,140 @@
+name: Hermes Client Build
+on: [workflow_dispatch]
+
+jobs:
+  build-armbian:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Armbian Build
+        run: git clone https://github.com/armbian/build
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            device-tree-compiler \
+            qemu-user-static \
+            binfmt-support \
+            qemu-system-arm \
+            qemu-efi-aarch64 \
+            qemu-utils \
+            gcc-aarch64-linux-gnu \
+            u-boot-tools \
+            libssl-dev \
+            patch \
+            flex \
+            bison
+          sudo systemctl restart systemd-binfmt
+
+      - name: Setup QEMU for cross compilation
+        run: |
+          sudo apt-get install -y qemu-user-static
+          which qemu-aarch64-static || echo "QEMU aarch64 not found"
+          sudo cp /usr/bin/qemu-aarch64-static /usr/local/bin/
+
+      - name: Setup userpatches structure
+        run: |
+          mkdir -p build/userpatches/{config/boards,kernel/rockchip64-current/arch/arm64/boot/dts/rockchip,cache/sources/u-boot/v2022.07/configs}
+          if [ -d "userpatches" ]; then
+            cp -r userpatches/* build/userpatches/
+          fi
+
+      - name: Add missing RK3308B files (核心修复)
+        run: |
+          # 1. 生成U-Boot defconfig
+          cat > build/cache/sources/u-boot/v2022.07/configs/sakurapi-rk3308b_defconfig << EOF
+          CONFIG_ARM64=y
+          CONFIG_ARCH_ROCKCHIP=y
+          CONFIG_TARGET_SAKURAPI_RK3308B=y
+          CONFIG_SYS_MALLOC_F_LEN=0x2000
+          CONFIG_ROCKCHIP_GPIO=y
+          CONFIG_SYS_LOAD_ADDR=0x80800000
+          CONFIG_SERIAL_CONSOLE=y
+          CONFIG_CONSOLE_BAUDRATE=1500000
+          CONFIG_SYS_MMC_ENV_DEV=0
+          CONFIG_ROCKCHIP_SDMMC=y
+          CONFIG_CMD_MMC=y
+          CONFIG_CMD_SF=y
+          CONFIG_SPI_FLASH=y
+          CONFIG_SPI_FLASH_WINBOND=y
+          CONFIG_DEFAULT_DEVICE_TREE="rk3308-sakurapi-rk3308b"
+          CONFIG_SPL_FRAMEWORK=y
+          CONFIG_SPL_RAM_SUPPORT=y
+          EOF
+
+          # 2. 生成设备树
+          cat > build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sakurapi-rk3308b.dts << EOF
+          /dts-v1/;
+          #include "rk3308.dtsi"
+          / {
+            model = "Sakura Pi RK3308B";
+            compatible = "rockchip,rk3308-sakurapi-rk3308b", "rockchip,rk3308";
+            chosen {
+              stdout-path = "serial2:1500000n8";
+            };
+            memory@60000000 {
+              device_type = "memory";
+              reg = <0x60000000 0x20000000>;
+            };
+          };
+          &uart2 { status = "okay"; };
+          &sdmmc { status = "okay"; bus-width = <4>; };
+          EOF
+
+          # 3. 编译DTB
+          dtc -I dts -O dtb -o build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sakurapi-rk3308b.dtb build/userpatches/kernel/rockchip64-current/arch/arm64/boot/dts/rockchip/rk3308-sakurapi-rk3308b.dts
+
+          # 4. 生成板级配置
+          cat > build/userpatches/config/boards/sogou_e1.conf << EOF
+          BOARD_NAME="Sogou E1"
+          BOARDFAMILY="rockchip64"
+          BOOTCONFIG="sakurapi-rk3308b_defconfig"
+          BOOTBRANCH="tag:v2022.07"
+          KERNEL_TARGET="current"
+          BOOT_FDT_FILE="rockchip/rk3308-sakurapi-rk3308b.dtb"
+          SERIALCON="ttyS2:1500000"
+          HAS_VIDEO_OUTPUT="no"
+          BL31_BLOB="rk33/rk3308_bl31_v2.26.elf"
+          DDR_BLOB="rk33/rk3308_ddr_589MHz_uart2_m1_v1.30.bin"
+          MINILOADER_BLOB="rk33/rk3308_miniloader_sd_nand_v1.13.bin"
+          PACKAGE_LIST_BOARD="alsa-utils firmware-realtek firmware-brcm80211 wireless-regdb wpasupplicant hostapd iw"
+          EOF
+
+      - name: Check available files (修复管道破裂)
+        run: |
+          cd build
+          echo "=== 检查可用的defconfig文件 ==="
+          find . -name "*defconfig" -path "*/u-boot/*" -print0 | xargs -0 grep -lE "(rk33|rockchip)" 2>/dev/null | head -10 || echo "未找到u-boot defconfig"
+          
+          echo -e "\n=== 检查Armbian现有板级配置 ==="
+          find config/boards -name "*.conf" -print0 | xargs -0 grep -l "rockchip64" 2>/dev/null | grep -v ".csc\|.wip" | head -10 || echo "未找到rockchip64板级配置"
+          
+          echo -e "\n=== 检查设备树文件 ==="
+          find . -name "rk33*.dts*" -print0 | xargs -0 ls -1 2>/dev/null | head -10 || echo "未找到设备树文件"
+
+      - name: Build Armbian image
+        run: |
+          cd build
+          sudo ./compile.sh \
+            BOARD=sogou_e1 \
+            BRANCH=current \
+            RELEASE=bookworm \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,img \
+            ARCH=arm64 \
+            TARGET=image \
+            IMAGE_SIZE=4G \
+            -j$(nproc)
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: armbian-rk3308-e1
+          path: |
+            build/output/images/*.img
+            build/output/images/*.img.sha
+            build/output/logs/*.log
